@@ -18,6 +18,7 @@ class RouterIntelPro:
     def __init__(self):
         self.gateway_ip = "192.168.99.254" 
         self.clues = []
+        self.management_url = None
         self.ssh_creds = [
             ('admin', 'pfsense'), ('root', 'pfsense'),
             ('admin', 'admin'), ('admin', 'password'),
@@ -37,29 +38,16 @@ class RouterIntelPro:
             self.clues.append({"source": source, "data": str(data).strip(), "weight": weight})
 
     def check_captive_portal(self):
-        """Detects if the router is intercepting traffic via a Captive Portal"""
-        # Common URLs used by OSs to detect portals
-        check_urls = [
-            "http://connectivitycheck.gstatic.com/generate_204",
-            "http://www.apple.com/library/test/success.html",
-            "http://detectportal.firefox.com/success.txt"
-        ]
-        
+        """Detects if the router is intercepting traffic and captures the portal URL"""
+        check_urls = ["http://connectivitycheck.gstatic.com/generate_204"]
         for url in check_urls:
             try:
-                # We use allow_redirects=False to catch the 302/307 redirect
-                r = requests.get(url, timeout=4, allow_redirects=False)
-                
-                # A portal exists if we get a redirect (302) or a 200 OK that isn't the expected content
+                r = requests.get(url, timeout=3, allow_redirects=False)
                 if 300 <= r.status_code < 400:
                     target = r.headers.get('Location', 'Unknown')
                     self.log_clue("Captive Portal", f"DETECTED (Redirect to: {target})", 80)
                     return True
-                elif r.status_code == 200 and "success" not in r.text.lower() and "google" not in url:
-                    self.log_clue("Captive Portal", "DETECTED (Content Hijack)", 80)
-                    return True
-            except:
-                continue
+            except: continue
         return False
 
     def get_hardware_intel(self):
@@ -74,28 +62,14 @@ class RouterIntelPro:
         if prefix == "40:62:31": vendor = "Intel (Custom/Whitebox)"
         elif prefix in ["00:08:A2", "90:EC:77"]: vendor = "Netgate Appliance"
         else: vendor = "Third-Party/Generic"
-            
         self.log_clue("Hardware", f"{vendor} ({mac})", 40)
 
-    def try_ssh_login(self):
-        print(f"[*] Port 22 Open. Testing SSH credentials...")
-        for user, pw in self.ssh_creds:
-            client = paramiko.SSHClient()
-            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            try:
-                client.connect(self.gateway_ip, username=user, password=pw, timeout=3)
-                self.log_clue("SSH Auth", f"SUCCESS ({user}:{pw})", 100)
-                _, stdout, _ = client.exec_command("uname -a")
-                self.log_clue("SSH System", stdout.read().decode().strip(), 100)
-                client.close()
-                return 
-            except:
-                client.close()
-
     def scan_web(self):
-        for proto in ["http", "https"]:
+        found_proto = []
+        for proto in ["https", "http"]: # Priority to HTTPS
             try:
                 r = requests.get(f"{proto}://{self.gateway_ip}", timeout=3, verify=False)
+                found_proto.append(proto)
                 server = r.headers.get("Server", "")
                 if server: self.log_clue(f"{proto.upper()} Server", server, 40)
                 
@@ -106,11 +80,17 @@ class RouterIntelPro:
                 if "pfsense" in r.text.lower():
                     self.log_clue("Web Content", f"Found pfSense keywords in {proto.upper()}", 50)
             except: continue
+        
+        # Set the management URL based on availability
+        if "https" in found_proto:
+            self.management_url = f"https://{self.gateway_ip}"
+        elif "http" in found_proto:
+            self.management_url = f"http://{self.gateway_ip}"
 
     def scan_services(self):
         ports = {22: "SSH", 53: "DNS", 80: "HTTP", 443: "HTTPS"}
-        open_list = []
         ssh_active = False
+        open_list = []
         for p, n in ports.items():
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.settimeout(0.5)
@@ -119,13 +99,31 @@ class RouterIntelPro:
                     if p == 22: ssh_active = True
         
         if open_list: self.log_clue("Open Ports", ", ".join(open_list), 20)
-        if ssh_active: self.try_ssh_login()
+        
+        # If standard ports are closed, check for common alt web port
+        if not self.management_url:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                if s.connect_ex((self.gateway_ip, 8080)) == 0:
+                    self.management_url = f"http://{self.gateway_ip}:8080"
+                    self.log_clue("Open Ports", "8080(HTTP-Alt)", 20)
+
+        if ssh_active: 
+            try:
+                # Basic login check for the report
+                client = paramiko.SSHClient()
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                for user, pw in self.ssh_creds:
+                    try:
+                        client.connect(self.gateway_ip, username=user, password=pw, timeout=2)
+                        self.log_clue("SSH Auth", f"SUCCESS ({user}:{pw})", 100)
+                        client.close()
+                        break
+                    except: continue
+            except: pass
 
     def run(self):
         print(f"[*] Auditing Gateway: {self.gateway_ip}...")
         self.get_hardware_intel()
-        
-        # New Check: Captive Portal
         self.check_captive_portal()
         
         try:
@@ -136,18 +134,20 @@ class RouterIntelPro:
         self.scan_web()
         self.scan_services()
 
-        # Score calculations
+        # Scoring
         scores = {v: 0 for v in self.fingerprints}
         for clue in self.clues:
             val = str(clue['data']).lower()
             for v, keywords in self.fingerprints.items():
-                if any(k in val for k in keywords):
-                    scores[v] += clue['weight']
+                if any(k in val for k in keywords): scores[v] += clue['weight']
 
         print("\n" + "="*60 + "\nROUTER INTELLIGENCE REPORT\n" + "="*60)
         for clue in self.clues:
             print(f" [+] {clue['source']:14}: {clue['data']}")
         
+        if self.management_url:
+            print(f" [+] WEB INTERFACE : {self.management_url}")
+
         print("\n[Confidence Assessment]")
         results = sorted(scores.items(), key=lambda x: x[1], reverse=True)
         for v, s in results:

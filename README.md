@@ -11,9 +11,22 @@ To turn [router_discover.py](router_discover.py) into an .exe file:
 1. Install pyinstaller
     - `pip install pyinstaller`
 2. Package
-    - because the script uses Scapy, which often requires administrative privileges to sniff packets or perform ARP lookups, use the `--uad-admin` flag
-    - `python -m PyInstaller --onefile --uac-admin --name "RouterAudit" .\router_discovery.py`
-    - look for the completed `RouterAudit.exe` in the `dist` folder
+    - because the script uses Scapy, which often requires administrative privileges to sniff packets or perform ARP lookups, use the `--uac-admin` flag
+~~~
+python -m PyInstaller --onefile --uac-admin --clean `
+--name "RouterAudit" `
+--collect-all scapy `
+--collect-all paramiko `
+--collect-all cryptography `
+--hidden-import=requests `
+--hidden-import=urllib3 `
+--copy-metadata requests `
+--copy-metadata paramiko `
+--copy-metadata cryptography `
+.\router_discovery.py
+~~~
+
+3. Look for the completed `RouterAudit.exe` in the `dist` folder
 
 BONUS: Add an icon file
 1. Get an `icon.ico file` and save it in the same directory

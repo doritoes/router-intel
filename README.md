@@ -1,7 +1,7 @@
 # router-intel
-This is a Local router intel tool. When helping someone with their home network, collect infomration about the router.
+This is a local router intel tool. When helping someone with their home network, collect information about the router.
 
-WARNING Only for use with persmission on the network. The script checks ssh for default credentials.
+WARNING Only for use with permission on the network. The script checks ssh for default credentials.
 
 Requirements:
 - `pip install paramiko scapy requests pysnmp`
